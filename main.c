@@ -11,7 +11,7 @@
 
 #include "macros.h"
 
-#define MUL 3
+#define MUL 1
 #define WIN_WIDTH (1920 * MUL)
 #define WIN_HEIGHT (1080 * MUL)
 #define NUM_BALLS (200 * MUL * MUL)
@@ -19,12 +19,12 @@
 #define MAX_SPEED (10 / (FPS / 60))
 #define EPSILON 0.001f
 #define FPS 60
-#define NUM_SECONDS (30 * 60)
+#define NUM_SECONDS (10)
 #define NUM_FRAMES (NUM_SECONDS * FPS)
 
 
 // define RENDER to render the output
-#define RENDERj
+#define RENDER
 
 // define SHOW to show the output in a window. can do both render and show at the same time.
 #define SHOW
@@ -328,33 +328,38 @@ bool close_on_key_press()
 
 void pipe_to_ffmpeg()
 {
-
-    // --- 2. Manually draw into an RGB24 pixel buffer ---
     static uint8_t rgb_buffer[WIN_WIDTH * WIN_HEIGHT * 3];
 
     // Fill background with vscode gray: #1e1e1e (30,30,30)
     memset(rgb_buffer, 30, sizeof(rgb_buffer));
 
-    // --- 3. Draw circles into the buffer ---
     for (int i = 0; i < NUM_BALLS; i++)
     {
-        int cx = (int)(balls[i].x + BALL_SIZE / 2.0f);
-        int cy = (int)(balls[i].y + BALL_SIZE / 2.0f);
-        int radius = BALL_SIZE / 2;
+        if (!balls[i].valid) continue;
+
+        float radius_f = balls[i].size / 2.0f;
+        int radius = (int)(radius_f + 0.5f); // Rounded radius
+        int cx = (int)(balls[i].x);          // Already center x
+        int cy = (int)(balls[i].y);          // Already center y
         int radius2 = radius * radius;
 
-        // Extract color from X11 color (ARGB) to RGB
+        // Extract RGB from packed color
         uint32_t color = (uint32_t)balls[i].color;
         uint8_t r = (color >> 16) & 0xFF;
         uint8_t g = (color >> 8) & 0xFF;
         uint8_t b = color & 0xFF;
 
-        for (int dy = -radius; dy <= radius; dy++) {
-            for (int dx = -radius; dx <= radius; dx++) {
-                if (dx * dx + dy * dy <= radius2) {
+        for (int dy = -radius; dy <= radius; dy++)
+        {
+            for (int dx = -radius; dx <= radius; dx++)
+            {
+                if (dx * dx + dy * dy <= radius2)
+                {
                     int px = cx + dx;
                     int py = cy + dy;
-                    if (px >= 0 && px < WIN_WIDTH && py >= 0 && py < WIN_HEIGHT) {
+
+                    if (px >= 0 && px < WIN_WIDTH && py >= 0 && py < WIN_HEIGHT)
+                    {
                         int idx = (py * WIN_WIDTH + px) * 3;
                         rgb_buffer[idx + 0] = r;
                         rgb_buffer[idx + 1] = g;
@@ -365,7 +370,6 @@ void pipe_to_ffmpeg()
         }
     }
 
-    // --- 4. Write frame to ffmpeg pipe ---
     fwrite(rgb_buffer, 1, WIN_WIDTH * WIN_HEIGHT * 3, ffmpeg);
 }
 
@@ -451,7 +455,7 @@ void simulate()
 int main()
 {
     #ifdef RENDER
-    char *fname = "out.mp4";///home/pi/Documents/Youtube/Balls/Frames/out.mp4";
+    char *fname = "/home/pi/Documents/Youtube/Balls/Frames/out.mp4";
     char command[256];
     sprintf(command, "ffmpeg -y -f rawvideo -pixel_format rgb24 -video_size %dx%d -framerate 60 "
         "-i - -vf format=yuv420p -c:v libx264 -preset fast %s", WIN_WIDTH, WIN_HEIGHT, fname);
