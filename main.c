@@ -11,10 +11,10 @@
 
 #include "macros.h"
 
-#define MUL 1
+#define MUL 3
 #define WIN_WIDTH (1920 * MUL)
 #define WIN_HEIGHT (1080 * MUL)
-#define NUM_BALLS (85 * MUL * MUL)
+#define NUM_BALLS (200 * MUL * MUL)
 #define BALL_SIZE 40
 #define MAX_SPEED (10 / (FPS / 60))
 #define EPSILON 0.001f
@@ -24,15 +24,17 @@
 
 
 // define RENDER to render the output
-#define RENDER
+#define RENDERj
 
 // define SHOW to show the output in a window. can do both render and show at the same time.
-#define SHOWy
+#define SHOW
 
 
 
 typedef struct
 {
+    bool valid;
+    float size;
     float x, y;
     float vx, vy;
     unsigned long color;
@@ -45,8 +47,8 @@ Display *display;
 Window window;
 XColor vscode_gray;
 GC gc;
-const float overlap_distance = (BALL_SIZE * BALL_SIZE) + EPSILON;
 struct timespec start = {0}, end = {0}; 
+
 
 FILE *ffmpeg;
 
@@ -54,13 +56,51 @@ FILE *ffmpeg;
 // ffmpeg -i out.mp4 -i music.mp3 -c:v copy -c:a aac -shortest Balls.mp4
 
 
+void apply_mutual_gravity()
+{
+    const float G = 0.05f; // Gravitational constant (tweak for desired strength)
 
+    for (int i = 0; i < NUM_BALLS; i++)
+    {
+        Ball *a = &balls[i];
+        if (!a->valid) continue;
+
+        float ax = 0.0f;
+        float ay = 0.0f;
+
+        for (int j = 0; j < NUM_BALLS; j++)
+        {
+            if (i == j) continue;
+
+            Ball *b = &balls[j];
+            if (!b->valid) continue;
+
+            float dx = b->x - a->x;
+            float dy = b->y - a->y;
+            float dist_sqr = dx * dx + dy * dy + EPSILON; // Add EPSILON to avoid divide-by-zero
+            float dist = sqrtf(dist_sqr);
+
+            float mass_a = a->size * a->size;
+            float mass_b = b->size * b->size;
+
+            float force = G * mass_a * mass_b / dist_sqr;
+
+            ax += force * dx / dist; // Normalize direction
+            ay += force * dy / dist;
+        }
+
+        a->vx += ax / (a->size * a->size); // F = ma => a = F/m
+        a->vy += ay / (a->size * a->size);
+    }
+}
 
 bool is_overlapping(const Ball *a, const Ball *b)
 {
     const float dx = a->x - b->x;
     const float dy = a->y - b->y;
-    return dx * dx + dy * dy < overlap_distance;
+    const float center_dist = sqrtf(dx * dx + dy * dy);
+    const float min_center_dist = (a->size + b->size)/2 + EPSILON;
+    return center_dist < min_center_dist;
 }
 
 void set_ball_position(const int i)
@@ -84,6 +124,9 @@ void set_ball_position(const int i)
     for (int j = 0; j < i; j++)
         if (is_overlapping(&balls[i], &balls[j]))
             goto MAKE_RANDOM_POSITION;
+    
+    ball->valid = True;
+    ball->size = BALL_SIZE;
 }
 
 void generate_random_color(const int i)
@@ -127,6 +170,12 @@ void make_balls()
     }
 }
 
+bool fsame(const float a, const float b)
+{
+    const float diff = a - b;
+    return (diff > 0 ? diff < 1e-6 : diff > -1e-6);
+}
+
 void handle_collision(const int i, const int j)
 {
     if (!is_overlapping(&balls[i], &balls[j]))
@@ -135,75 +184,83 @@ void handle_collision(const int i, const int j)
     Ball *ball_a = &balls[i];
     Ball *ball_b = &balls[j];
 
-    float dx = ball_a->x - ball_b->x;
-    float dy = ball_a->y - ball_b->y;
-    float dist = sqrtf(dx * dx + dy * dy);
+    const float ma = ball_a->size * ball_a->size;
+    const float mb = ball_b->size * ball_b->size;
+    const float new_size = sqrtf(ma + mb);
 
-    // just in case the two circles are perfectly overlapping.
-    if (dist < 1e-6f)
+    const float kgvax = ma * ball_a->vx;
+    const float kgvay = ma * ball_a->vy;
+    const float kgvbx = mb * ball_b->vx;
+    const float kgvby = mb * ball_b->vy;
+
+    const float new_xv = (kgvbx + kgvax) / (mb + ma);
+    const float new_yv = (kgvby + kgvay) / (mb + ma);
+
+    if (fsame(ball_a->size, ball_b->size))
     {
-        dx = 1.0f;
-        dy = 0.0f;
-        dist = 1.0f;
+        if ((ball_a->vx * ball_a->vx + ball_a->vy * ball_a->vy) >
+            (ball_b->vx * ball_b->vx + ball_b->vy * ball_b->vy))
+            ball_b->valid = false;
+        else
+            ball_a->valid = false;
     }
+    else if (ball_a->size > ball_b->size)
+        ball_b->valid = false;
+    else
+        ball_a->valid = false;
 
-    const float nx = dx / dist;
-    const float ny = dy / dist;
-
-    // --- Positional correction only ---
-    const float overlap = BALL_SIZE - dist;
-    const float separation = overlap / 2.0f;
-
-    ball_a->x += nx * separation;
-    ball_a->y += ny * separation;
-    ball_b->x -= nx * separation;
-    ball_b->y -= ny * separation;
-
-    // --- Velocity bounce only if approaching ---
-    const float rvx = ball_a->vx - ball_b->vx;
-    const float rvy = ball_a->vy - ball_b->vy;
-    const float velAlongNormal = rvx * nx + rvy * ny;
-
-    if (velAlongNormal < 0.0f)
-    {
-        const float restitution = 1.0f;
-        const float impulse = -(1.0f + restitution) * velAlongNormal / 2.0f;
-
-        const float impulseX = impulse * nx;
-        const float impulseY = impulse * ny;
-
-        ball_a->vx += impulseX;
-        ball_a->vy += impulseY;
-        ball_b->vx -= impulseX;
-        ball_b->vy -= impulseY;
-    }
+    Ball *merged = ball_a->valid ? ball_a : ball_b;
+    merged->size = new_size;
+    merged->vx = new_xv;
+    merged->vy = new_yv;
 }
 
 void update_positions()
 {
-    #pragma omp parallel for schedule(static)
     for (int i = 0; i < NUM_BALLS; i++)
     {
         Ball *ball = &balls[i];
-
+        if (!ball->valid)
+            continue;
+    
         ball->x += ball->vx;
         ball->y += ball->vy;
-
-        if (ball->x < 0 || ball->x + BALL_SIZE > WIN_WIDTH)
+    
+        float radius = ball->size / 2.0f;
+    
+        // Bounce off the left or right wall
+        if (ball->x - radius < 0)
         {
+            ball->x = radius;
             ball->vx *= -1;
-            ball->x += ball->vx;
         }
-        if (ball->y < 0 || ball->y + BALL_SIZE > WIN_HEIGHT)
+        else if (ball->x + radius > WIN_WIDTH)
         {
+            ball->x = WIN_WIDTH - radius;
+            ball->vx *= -1;
+        }
+    
+        // Bounce off the top or bottom wall
+        if (ball->y - radius < 0)
+        {
+            ball->y = radius;
             ball->vy *= -1;
-            ball->y += ball->vy;
+        }
+        else if (ball->y + radius > WIN_HEIGHT)
+        {
+            ball->y = WIN_HEIGHT - radius;
+            ball->vy *= -1;
         }
     }
+    
 
     for (int i = 0; i < NUM_BALLS; i++)
+    {
+        if (! balls[i].valid) continue;
         for (int j = i + 1; j < NUM_BALLS; j++)
-            handle_collision(i, j);
+            if (balls[j].valid) 
+                handle_collision(i, j);
+    }
 }
 
 void setup_display()
@@ -328,10 +385,12 @@ void draw_screen()
     XClearWindow(display, window);
     for (int i = 0; i < NUM_BALLS; i++)
     {
-        XSetForeground(display, gc, balls[i].color);
+        Ball *b = &balls[i];
+        if (!b->valid) continue;
+        XSetForeground(display, gc, b->color);
         XFillArc(display, window, gc,
-                    (int)balls[i].x, (int)balls[i].y,
-                    BALL_SIZE, BALL_SIZE, 0, 360 * 64);
+                    (int)(b->x - b->size/2), (int)(b->y - b->size/2),
+                    (unsigned int)b->size, (unsigned int)b->size, 0, 360 * 64);
     }
     XFlush(display);
     #endif
@@ -341,9 +400,19 @@ void draw_screen()
     #endif
 }
 
+
+int existing_balls()
+{
+    int sum = 0;
+    for (int i = 0; i < NUM_BALLS; ++i)
+        sum += (int) balls[i].valid;
+    return sum;
+}
+
 void simulate()
 {
-    uint32_t num_frames = 0;
+    int num_frames = 0;
+    int wait_frames = 0;
 
     LOOP:
     clock_gettime(CLOCK_MONOTONIC, &start);
@@ -353,8 +422,21 @@ void simulate()
         return;
     #endif
 
+    apply_mutual_gravity();
     update_positions();
     draw_screen();
+
+
+    if (existing_balls() == 1)
+    {
+        wait_frames++;
+    }
+    if (wait_frames > 60)
+    {
+        wait_frames = 0;
+        memset(balls, 0, sizeof(balls));
+        make_balls();
+    }
 
     const int delay  = (1000000 / FPS) - timer();
     if (delay > 0) usleep((__useconds_t)delay); 
